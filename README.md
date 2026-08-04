@@ -57,14 +57,34 @@ Build a rough rectangle around the search point so we do not Haversine every row
 - Longitude degrees shrink as you leave the equator, so we divide by `cos(latitude)`.
 - Example: search at Amsterdam `(52.37, 4.89)` with `radius=5` km → latitude window about `±0.045°`, longitude window a bit wider (~`±0.07°`). SQL keeps only rows inside that box.
 
-**Step 2 — Haversine (exact great-circle distance in Go)**  
-For each candidate from the box, compute the shortest path over the sphere:
+**Step 2 — Haversine formula (exact great-circle distance in Go)**
 
-1. Convert latitudes and longitudes from degrees to radians.
-2. From the difference in latitude and the difference in longitude, build the Haversine value `a`.
-3. Turn that into a central angle with `2 * atan2(sqrt(a), sqrt(1 - a))`.
-4. Multiply by 6371 to get distance in kilometres.
-5. Keep the charge point only if `distance <= radius`.
+Flat Euclidean distance on lat/lon is wrong: Earth is a sphere, and 1° of longitude is shorter near the poles than at the equator. The **Haversine formula** gives the shortest path along the surface (great-circle distance) between two WGS84 points.
+
+With φ = latitude, λ = longitude (radians), and R = 6371 km:
+
+```
+a = sin²(Δφ/2) + cos(φ₁)·cos(φ₂)·sin²(Δλ/2)
+c = 2 · atan2(√a, √(1 − a))
+d = R · c
+```
+
+What each symbol means:
+
+| Symbol | Meaning |
+|--------|---------|
+| Δφ, Δλ | Difference in latitude / longitude |
+| `a` | Square of half the chord length between the points on the unit sphere (“haversine” of the central angle) |
+| `c` | Central angle between the two points (radians) |
+| `d` | Surface distance in km |
+
+In code (`internal/geo.HaversineKm`):
+
+1. Convert both points from degrees to radians.
+2. Compute `a` from half-sines of Δφ and Δλ as above.
+3. Compute `c = 2 * atan2(sqrt(a), sqrt(1 - a))`.
+4. Return `d = 6371 * c`.
+5. Keep the charge point only if `d <= radius`.
 
 Why both steps? The box is a **square-ish** cutout; its corners are farther than `radius`. Haversine keeps the true **circle**.
 
