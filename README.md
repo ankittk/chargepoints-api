@@ -44,6 +44,40 @@ curl -s -X POST http://localhost:8080/chargepoints \
   -d '{"name":"Dock 9","location":{"lat":52.37,"lon":4.89},"status":"AVAILABLE"}'
 ```
 
+## Algorithms
+
+### Nearby search (bounding box + Haversine)
+
+We treat Earth as a sphere with radius **6371 km**. To answer “which chargers are within N km of this point?” we do two steps (`internal/geo` + store):
+
+**Step 1 — bounding box (fast prefilter in SQL)**  
+Build a rough rectangle around the search point so we do not Haversine every row in the database.
+
+- About **111 km** equals **1 degree** of latitude.
+- Longitude degrees shrink as you leave the equator, so we divide by `cos(latitude)`.
+- Example: search at Amsterdam `(52.37, 4.89)` with `radius=5` km → latitude window about `±0.045°`, longitude window a bit wider (~`±0.07°`). SQL keeps only rows inside that box.
+
+**Step 2 — Haversine (exact great-circle distance in Go)**  
+For each candidate from the box, compute the shortest path over the sphere:
+
+1. Convert latitudes and longitudes from degrees to radians.
+2. From the difference in latitude and the difference in longitude, build the Haversine value `a`.
+3. Turn that into a central angle with `2 * atan2(sqrt(a), sqrt(1 - a))`.
+4. Multiply by 6371 to get distance in kilometres.
+5. Keep the charge point only if `distance <= radius`.
+
+Why both steps? The box is a **square-ish** cutout; its corners are farther than `radius`. Haversine keeps the true **circle**.
+
+**Examples**
+
+| Query | What happens |
+|-------|----------------|
+| `nearby?lat=52.37&lon=4.89&radius=5` | Seed chargers in central Amsterdam are inside; a charger in Rotterdam (~60 km) is outside. |
+| Same point, `radius=0.01` | Almost nothing matches — very tight circle. |
+| Two identical points | Haversine returns `0` km. |
+
+**Limits:** if the box would cross the date line (±180° longitude) we clamp instead of wrapping, so searches there can miss points. Good enough for “chargers nearby”; not a full geodesic library. Later upgrade: PostGIS or S2.
+
 ## Test and lint
 
 ```bash
@@ -116,7 +150,6 @@ SQLite (`modernc.org/sqlite`, pure Go, no CGO) makes `make run`, CI, and Docker 
 
 ### Other deliberate choices
 
-- **Nearby:** lat/lon bounding-box prefilter in SQL, then Haversine in Go. Antimeridian (±180°) boxes are clamped (known ceiling). Upgrade: PostGIS / S2.
 - **Rate limit:** per-IP token bucket behind a mutex (map size capped); background eviction of idle IPs. Enable `TRUST_PROXY` only behind a trusted proxy.
 - **Hardening:** body ≤ 64KiB, nearby radius ≤ 2000 km, reject NaN/Inf lat/lon, name length cap.
 - **Lifecycle:** graceful shutdown on SIGINT/SIGTERM (HTTP drain + OTel flush).
